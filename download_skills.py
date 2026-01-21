@@ -36,7 +36,7 @@ import threading
 
 class SkillsDownloader:
     API_BASE = "https://skillsmp.com/api/v1"
-    AUTH_TOKEN = os.getenv("SKILLSMP_API_TOKEN", "")
+    AUTH_TOKEN = os.getenv("SKILLSMP_API_TOKEN", "sk_live_skillsmp_91-dUhDJ5m7NkJ_stVlNwsVucHnZ_lOHoG1OSoZAEUU")
     SKILLS_DIR = Path.home() / ".claude" / "skills"
     GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")  # Optional: GitHub token for API access
 
