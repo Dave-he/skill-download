@@ -38,6 +38,7 @@ class SkillsDownloader:
     API_BASE = "https://skillsmp.com/api/v1"
     AUTH_TOKEN = os.getenv("SKILLSMP_API_TOKEN", "")
     SKILLS_DIR = Path.home() / ".claude" / "skills"
+    GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")  # Optional: GitHub token for API access
 
     def __init__(self, min_stars: int = 1000, workers: int = 5, max_retries: int = 3,
                  retry_delay: float = 1.0):
@@ -61,9 +62,9 @@ class SkillsDownloader:
     def _load_downloaded_skills(self):
         """Load already downloaded skills from the skills directory."""
         if self.SKILLS_DIR.exists():
-            for f in self.SKILLS_DIR.glob("*.md"):
-                skill_id = f.stem
-                self._downloaded_skills.add(skill_id)
+            for skill_dir in self.SKILLS_DIR.iterdir():
+                if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
+                    self._downloaded_skills.add(skill_dir.name)
             print(f"  ✓ Found {len(self._downloaded_skills)} existing skills")
 
     def search_skills(self, query: str, page: int = 1, limit: int = 50,
@@ -195,33 +196,157 @@ class SkillsDownloader:
         print(f"Found {len(filtered)} skills with >= {self.min_stars} stars")
         return filtered
 
-    def get_skill_download_urls(self, skill: Dict) -> List[str]:
-        """Convert githubUrl to raw content URL.
-
-        Returns a list of possible URLs (tries both skill.md and SKILL.md).
-
-        Example conversion:
-        - From: https://github.com/user/repo/tree/main/path/to/skill
-        - To: https://raw.githubusercontent.com/user/repo/main/path/to/skill/skill.md
+    def parse_github_url(self, github_url: str) -> Optional[Dict[str, str]]:
+        """Parse GitHub URL to extract owner, repo, branch, and path.
+        
+        Example:
+        - Input: https://github.com/user/repo/tree/main/path/to/skill
+        - Output: {
+            "owner": "user",
+            "repo": "repo", 
+            "branch": "main",
+            "path": "path/to/skill"
+          }
         """
-        github_url = skill.get("githubUrl", "")
-
         if not github_url:
+            return None
+            
+        # Remove trailing slash
+        url = github_url.rstrip("/")
+        
+        # Pattern: https://github.com/{owner}/{repo}/tree/{branch}/{path}
+        parts = url.replace("https://github.com/", "").split("/")
+        
+        if len(parts) < 4 or parts[2] != "tree":
+            return None
+            
+        owner = parts[0]
+        repo = parts[1]
+        branch = parts[3]
+        path = "/".join(parts[4:]) if len(parts) > 4 else ""
+        
+        return {
+            "owner": owner,
+            "repo": repo,
+            "branch": branch,
+            "path": path
+        }
+    
+    def get_github_directory_contents(self, owner: str, repo: str, 
+                                      path: str, branch: str = "main") -> List[Dict]:
+        """Get directory contents from GitHub API.
+        
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            path: Path to directory
+            branch: Branch name (default: main)
+            
+        Returns:
+            List of file/directory info dictionaries
+        """
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+        params = {"ref": branch}
+        
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; SkillsDownloader/1.0)"}
+        if self.GITHUB_TOKEN:
+            headers["Authorization"] = f"token {self.GITHUB_TOKEN}"
+        
+        try:
+            response = requests.get(api_url, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            # If API fails, try to get SKILL.md directly via raw URL
+            print(f"    ⚠ GitHub API failed: {e}")
             return []
-
-        # Replace github.com with raw.githubusercontent.com
-        url = github_url.replace("github.com", "raw.githubusercontent.com")
-        # Replace /tree/ with / to get the raw content path
-        url = url.replace("/tree/", "/")
-        url = url.rstrip("/")
-
-        # Try both skill.md (lowercase) and SKILL.md (uppercase)
-        urls = [
-            f"{url}/skill.md",
-            f"{url}/SKILL.md"
-        ]
-
-        return urls
+    
+    def download_file_from_github(self, download_url: str, 
+                                   output_path: Path) -> bool:
+        """Download a single file from GitHub raw URL.
+        
+        Args:
+            download_url: Raw file URL
+            output_path: Local file path to save
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        github_session = requests.Session()
+        github_session.headers.update({
+            "User-Agent": "Mozilla/5.0 (compatible; SkillsDownloader/1.0)"
+        })
+        
+        for attempt in range(self.max_retries):
+            try:
+                response = github_session.get(download_url, timeout=30)
+                response.raise_for_status()
+                
+                # Create parent directory if needed
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Write file
+                with open(output_path, "wb") as f:
+                    f.write(response.content)
+                
+                return True
+                
+            except requests.RequestException as e:
+                if attempt < self.max_retries - 1:
+                    wait_time = self.retry_delay * (attempt + 1)
+                    print(f"    ⚠ Retry {attempt + 1}/{self.max_retries} in {wait_time}s: {e}")
+                    time.sleep(wait_time)
+                else:
+                    print(f"    ✗ Failed to download: {e}")
+                    return False
+        
+        return False
+    
+    def download_github_directory(self, owner: str, repo: str, 
+                                   repo_path: str, local_path: Path,
+                                   branch: str = "main") -> int:
+        """Recursively download entire directory from GitHub.
+        
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            repo_path: Path in repository
+            local_path: Local directory to save files
+            branch: Branch name
+            
+        Returns:
+            Number of files downloaded
+        """
+        contents = self.get_github_directory_contents(owner, repo, repo_path, branch)
+        
+        if not contents:
+            return 0
+        
+        downloaded_count = 0
+        
+        for item in contents:
+            item_type = item.get("type")
+            item_name = item.get("name")
+            item_path = item.get("path")
+            
+            if item_type == "file":
+                # Download file
+                download_url = item.get("download_url")
+                if download_url:
+                    output_file = local_path / item_name
+                    if self.download_file_from_github(download_url, output_file):
+                        print(f"    ✓ {item_name}")
+                        downloaded_count += 1
+                    
+            elif item_type == "dir":
+                # Recursively download subdirectory
+                subdir_path = local_path / item_name
+                subdir_count = self.download_github_directory(
+                    owner, repo, item_path, subdir_path, branch
+                )
+                downloaded_count += subdir_count
+        
+        return downloaded_count
 
     def is_already_downloaded(self, skill: Dict) -> bool:
         """Check if a skill is already downloaded."""
@@ -239,62 +364,92 @@ class SkillsDownloader:
             True if download was successful, False otherwise
         """
         name = skill.get("name", "unknown")
-        skill_id = skill.get("id", "unknown")
-        download_urls = self.get_skill_download_urls(skill)
-
-        if not download_urls:
-            print(f"  ⚠ No download URL for {name}")
+        github_url = skill.get("githubUrl", "")
+        
+        if not github_url:
+            print(f"  ⚠ No GitHub URL for {name}")
             return False
 
-        output_path = self.SKILLS_DIR / f"{skill_id}.md"
+        # Parse GitHub URL
+        url_info = self.parse_github_url(github_url)
+        if not url_info:
+            print(f"  ⚠ Invalid GitHub URL for {name}: {github_url}")
+            return False
+
+        # Create skill directory: ~/.claude/skills/<skill-name>/
+        skill_dir = self.SKILLS_DIR / name
+        skill_md_path = skill_dir / "SKILL.md"
 
         # Check if already downloaded
-        if output_path.exists() and not force:
-            print(f"  ✓ Already exists: {name} → {output_path}")
+        if skill_md_path.exists() and not force:
+            print(f"  ✓ Already exists: {name} → {skill_dir}")
             with self._lock:
-                self._downloaded_skills.add(skill_id)
+                self._downloaded_skills.add(name)
             return True
 
-        # Create a separate session for GitHub downloads (without Auth token)
-        github_session = requests.Session()
-        github_session.headers.update({
-            "User-Agent": "Mozilla/5.0 (compatible; SkillsDownloader/1.0)"
-        })
-
-        # Try each URL
-        for download_url in download_urls:
-            # Retry loop for each URL
-            for attempt in range(self.max_retries):
-                try:
-                    response = github_session.get(download_url, timeout=30)
-                    response.raise_for_status()
-
-                    # HTML response indicates file doesn't exist at this URL
-                    if response.text.strip().startswith("<!DOCTYPE html>"):
-                        continue  # Try next URL
-
-                    with open(output_path, "w", encoding="utf-8") as f:
-                        f.write(response.text)
-
-                    stars = skill.get("stars", 0)
-                    print(f"  ✓ Downloaded {name} ({stars} stars) → {output_path}")
-
-                    with self._lock:
-                        self._downloaded_skills.add(skill_id)
-                    return True
-
-                except requests.RequestException as e:
-                    if attempt < self.max_retries - 1:
-                        wait_time = self.retry_delay * (attempt + 1)
-                        print(f"  ⚠ Retry {attempt + 1}/{self.max_retries} for {name} "
-                              f"in {wait_time}s: {e}")
-                        time.sleep(wait_time)
-                    else:
-                        # Try next URL if available
-                        continue
-
-        # All URLs failed
-        print(f"  ✗ Failed to download {name} - all URLs failed")
+        # Download entire directory from GitHub
+        print(f"  📥 Downloading {name}...")
+        
+        try:
+            downloaded_count = self.download_github_directory(
+                owner=url_info["owner"],
+                repo=url_info["repo"],
+                repo_path=url_info["path"],
+                local_path=skill_dir,
+                branch=url_info["branch"]
+            )
+            
+            # If directory download failed, try downloading SKILL.md directly
+            if downloaded_count == 0 or not skill_md_path.exists():
+                print(f"    ⚠ Directory download failed, trying direct SKILL.md download...")
+                if self.download_skill_md_directly(url_info, skill_dir):
+                    downloaded_count = 1
+            
+            if downloaded_count > 0 and skill_md_path.exists():
+                stars = skill.get("stars", 0)
+                print(f"  ✓ Downloaded {name} ({downloaded_count} files, {stars} stars) → {skill_dir}")
+                
+                with self._lock:
+                    self._downloaded_skills.add(name)
+                return True
+            else:
+                print(f"  ✗ Failed to download {name} - SKILL.md not found")
+                # Clean up empty directory
+                if skill_dir.exists() and not any(skill_dir.iterdir()):
+                    skill_dir.rmdir()
+                return False
+                
+        except Exception as e:
+            print(f"  ✗ Error downloading {name}: {e}")
+            # Clean up partial download
+            if skill_dir.exists() and not any(skill_dir.iterdir()):
+                skill_dir.rmdir()
+            return False
+    
+    def download_skill_md_directly(self, url_info: Dict[str, str], 
+                                    skill_dir: Path) -> bool:
+        """Fallback: Download SKILL.md directly via raw URL.
+        
+        Args:
+            url_info: Parsed GitHub URL info
+            skill_dir: Local skill directory
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        owner = url_info["owner"]
+        repo = url_info["repo"]
+        branch = url_info["branch"]
+        path = url_info["path"]
+        
+        # Try both SKILL.md and skill.md
+        for filename in ["SKILL.md", "skill.md"]:
+            raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}/{filename}"
+            output_path = skill_dir / "SKILL.md"
+            
+            if self.download_file_from_github(raw_url, output_path):
+                return True
+        
         return False
 
     def download_skills_parallel(self, skills: List[Dict],
