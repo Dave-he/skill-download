@@ -36,7 +36,7 @@ import threading
 
 class SkillsDownloader:
     API_BASE = "https://skillsmp.com/api/v1"
-    AUTH_TOKEN = "sk_live_skillsmp_91-dUhDJ5m7NkJ_stVlNwsVucHnZ_lOHoG1OSoZAEUU"
+    AUTH_TOKEN = os.getenv("SKILLSMP_API_TOKEN", "")
     SKILLS_DIR = Path.home() / ".claude" / "skills"
 
     def __init__(self, min_stars: int = 1000, workers: int = 5, max_retries: int = 3,
