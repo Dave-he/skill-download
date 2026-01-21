@@ -10,6 +10,7 @@ Features:
 - Automatic retry on failures
 - Resume capability (skip already downloaded skills)
 - Support for both skill.md and SKILL.md file names
+- Multi-level directory organization (--organize flag)
 
 Usage:
     python download_skills.py <search_query> [min_stars]
@@ -17,11 +18,13 @@ Usage:
     python download_skills.py --top N [min_stars]  # Download top N skills
     python download_skills.py --workers N          # Set number of parallel workers
     python download_skills.py --retry N            # Number of retries on failure
+    python download_skills.py --organize           # Organize skills by category
 
 Examples:
     python download_skills.py SEO 1000
     python download_skills.py --all 500 --workers 10
     python download_skills.py --top 100 --retry 3
+    python download_skills.py --all --organize     # Organize by category
 """
 
 import os
@@ -32,6 +35,112 @@ from pathlib import Path
 from typing import List, Dict, Optional, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import re
+
+
+class SkillCategorizer:
+    """Categorizes skills based on their description using keyword matching."""
+    
+    # 分类规则：按照"功能/流程/权限"原则组织
+    CATEGORIES = {
+        # 功能分类 (Function)
+        "Development": {
+            "keywords": ["development", "coding", "programming", "dev", "build", "compile"],
+            "subcategories": {
+                "Frontend": ["frontend", "react", "vue", "angular", "UI", "web design", "css", "html"],
+                "Backend": ["backend", "api", "server", "database", "sql", "postgresql", "redis"],
+                "Mobile": ["mobile", "ios", "android", "react native", "flutter", "swift", "kotlin"],
+                "DevOps": ["devops", "ci/cd", "docker", "kubernetes", "deployment", "infrastructure"]
+            }
+        },
+        "Data": {
+            "keywords": ["data", "analytics", "analysis", "machine learning", "ml", "ai"],
+            "subcategories": {
+                "DataScience": ["data science", "statistics", "visualization", "pandas", "numpy"],
+                "MachineLearning": ["machine learning", "deep learning", "neural network", "pytorch", "tensorflow"],
+                "DataEngineering": ["etl", "pipeline", "data warehouse", "spark", "airflow"]
+            }
+        },
+        "Testing": {
+            "keywords": ["test", "testing", "qa", "quality", "e2e", "unit test", "integration"],
+            "subcategories": {
+                "UnitTesting": ["unit test", "jest", "pytest", "vitest"],
+                "E2ETesting": ["e2e", "end-to-end", "playwright", "cypress", "selenium"],
+                "Performance": ["performance", "load test", "benchmark", "profiling"]
+            }
+        },
+        "Documentation": {
+            "keywords": ["documentation", "docs", "writing", "markdown", "readme"],
+            "subcategories": {
+                "Technical": ["technical writing", "api doc", "sdk doc"],
+                "UserGuides": ["user guide", "tutorial", "how-to"],
+                "Blog": ["blog", "article", "post"]
+            }
+        },
+        "Security": {
+            "keywords": ["security", "authentication", "authorization", "encryption", "compliance", "audit"],
+            "subcategories": {
+                "Auth": ["authentication", "oauth", "jwt", "sso"],
+                "Audit": ["security audit", "vulnerability", "penetration test", "audit"],
+                "Compliance": ["compliance", "gdpr", "hipaa", "pci", "regulatory"]
+            }
+        },
+        "Design": {
+            "keywords": ["design", "ui", "ux", "visual", "graphic"],
+            "subcategories": {
+                "UIDesign": ["ui design", "interface", "component library"],
+                "UXDesign": ["ux design", "user experience", "usability"],
+                "Graphics": ["graphics", "illustration", "image"]
+            }
+        },
+        "Business": {
+            "keywords": ["business", "product", "management", "strategy", "marketing"],
+            "subcategories": {
+                "ProductManagement": ["product", "prd", "roadmap", "feature"],
+                "Marketing": ["marketing", "seo", "content", "social media"],
+                "Analytics": ["analytics", "metrics", "kpi", "dashboard"]
+            }
+        },
+        "Research": {
+            "keywords": ["research", "scientific", "academic", "paper", "study"],
+            "subcategories": {
+                "Scientific": ["scientific", "biology", "chemistry", "physics"],
+                "Academic": ["academic", "publication", "citation"],
+                "Medical": ["medical", "healthcare", "clinical"]
+            }
+        }
+    }
+    
+    @classmethod
+    def categorize(cls, description: str) -> tuple[str, Optional[str]]:
+        """
+        Categorize a skill based on its description.
+        
+        Args:
+            description: Skill description text
+            
+        Returns:
+            Tuple of (category, subcategory)
+        """
+        if not description:
+            return "Uncategorized", None
+            
+        desc_lower = description.lower()
+        
+        # Try to match subcategories first for better precision
+        for category, config in cls.CATEGORIES.items():
+            # Try to find subcategory first
+            for subcat, subcat_keywords in config["subcategories"].items():
+                if any(keyword in desc_lower for keyword in subcat_keywords):
+                    return category, subcat
+        
+        # If no subcategory matched, try main category keywords
+        for category, config in cls.CATEGORIES.items():
+            if any(keyword in desc_lower for keyword in config["keywords"]):
+                return category, None
+        
+        # No match found
+        return "Uncategorized", None
 
 
 class SkillsDownloader:
@@ -41,11 +150,12 @@ class SkillsDownloader:
     GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")  # Optional: GitHub token for API access
 
     def __init__(self, min_stars: int = 1000, workers: int = 5, max_retries: int = 3,
-                 retry_delay: float = 1.0):
+                 retry_delay: float = 1.0, organize: bool = False):
         self.min_stars = min_stars
         self.workers = workers
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.organize = organize  # Enable multi-level organization
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {self.AUTH_TOKEN}",
@@ -61,11 +171,57 @@ class SkillsDownloader:
 
     def _load_downloaded_skills(self):
         """Load already downloaded skills from the skills directory."""
-        if self.SKILLS_DIR.exists():
+        if not self.SKILLS_DIR.exists():
+            return
+            
+        if self.organize:
+            # Search in organized directory structure
+            for category_dir in self.SKILLS_DIR.iterdir():
+                if not category_dir.is_dir():
+                    continue
+                # Check category and subcategory levels
+                for item in category_dir.iterdir():
+                    if item.is_dir():
+                        if (item / "SKILL.md").exists():
+                            self._downloaded_skills.add(item.name)
+                        else:
+                            # Check subcategory level
+                            for skill_dir in item.iterdir():
+                                if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
+                                    self._downloaded_skills.add(skill_dir.name)
+        else:
+            # Flat directory structure
             for skill_dir in self.SKILLS_DIR.iterdir():
                 if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
                     self._downloaded_skills.add(skill_dir.name)
+                    
+        if self._downloaded_skills:
             print(f"  ✓ Found {len(self._downloaded_skills)} existing skills")
+
+    def get_skill_directory(self, skill: Dict) -> Path:
+        """
+        Get the target directory for a skill based on organization mode.
+        
+        Args:
+            skill: Skill dictionary
+            
+        Returns:
+            Path to skill directory
+        """
+        name = skill.get("name", "unknown")
+        
+        if not self.organize:
+            # Flat structure: ~/.claude/skills/<skill-name>/
+            return self.SKILLS_DIR / name
+        
+        # Multi-level structure: ~/.claude/skills/<category>/<subcategory>/<skill-name>/
+        description = skill.get("description", "")
+        category, subcategory = SkillCategorizer.categorize(description)
+        
+        if subcategory:
+            return self.SKILLS_DIR / category / subcategory / name
+        else:
+            return self.SKILLS_DIR / category / name
 
     def search_skills(self, query: str, page: int = 1, limit: int = 50,
                       sort_by: str = "stars", order: str = "desc") -> List[Dict]:
@@ -108,6 +264,8 @@ class SkillsDownloader:
 
         print(f"\n{'='*60}")
         print(f"Fetching ALL skills (min_stars={min_stars})")
+        if self.organize:
+            print("Organization mode: ENABLED (multi-level directory structure)")
         print(f"{'='*60}\n")
 
         while True:
@@ -143,7 +301,27 @@ class SkillsDownloader:
             time.sleep(delay)
 
         print(f"\nTotal skills fetched: {len(all_skills)}")
+        
+        # Show category statistics if organizing
+        if self.organize and all_skills:
+            self._print_category_stats(all_skills)
+            
         return all_skills
+
+    def _print_category_stats(self, skills: List[Dict]):
+        """Print categorization statistics."""
+        category_counts = {}
+        for skill in skills:
+            description = skill.get("description", "")
+            category, subcategory = SkillCategorizer.categorize(description)
+            key = f"{category}/{subcategory}" if subcategory else category
+            category_counts[key] = category_counts.get(key, 0) + 1
+        
+        print(f"\n{'='*60}")
+        print("Category Distribution:")
+        print(f"{'='*60}")
+        for category, count in sorted(category_counts.items(), key=lambda x: x[1], reverse=True):
+            print(f"  {category}: {count} skills")
 
     def get_top_skills(self, n: int, min_stars: int = 0,
                        delay: float = 0.2) -> List[Dict]:
@@ -154,6 +332,8 @@ class SkillsDownloader:
 
         print(f"\n{'='*60}")
         print(f"Fetching TOP {n} skills (min_stars={min_stars})")
+        if self.organize:
+            print("Organization mode: ENABLED (multi-level directory structure)")
         print(f"{'='*60}\n")
 
         while len(all_skills) < n:
@@ -187,6 +367,10 @@ class SkillsDownloader:
         if min_stars > 0:
             all_skills = [s for s in all_skills if s.get("stars", 0) >= min_stars]
             print(f"\nAfter min_stars filter: {len(all_skills)} skills")
+
+        # Show category statistics if organizing
+        if self.organize and all_skills:
+            self._print_category_stats(all_skills)
 
         return all_skills
 
@@ -350,8 +534,8 @@ class SkillsDownloader:
 
     def is_already_downloaded(self, skill: Dict) -> bool:
         """Check if a skill is already downloaded."""
-        skill_id = skill.get("id", "")
-        return skill_id in self._downloaded_skills
+        name = skill.get("name", "")
+        return name in self._downloaded_skills
 
     def download_skill(self, skill: Dict, force: bool = False) -> bool:
         """Download a single skill file with retry logic.
@@ -376,19 +560,31 @@ class SkillsDownloader:
             print(f"  ⚠ Invalid GitHub URL for {name}: {github_url}")
             return False
 
-        # Create skill directory: ~/.claude/skills/<skill-name>/
-        skill_dir = self.SKILLS_DIR / name
+        # Get skill directory (flat or organized)
+        skill_dir = self.get_skill_directory(skill)
         skill_md_path = skill_dir / "SKILL.md"
 
         # Check if already downloaded
         if skill_md_path.exists() and not force:
-            print(f"  ✓ Already exists: {name} → {skill_dir}")
+            if self.organize:
+                description = skill.get("description", "")
+                category, subcategory = SkillCategorizer.categorize(description)
+                cat_path = f"{category}/{subcategory}" if subcategory else category
+                print(f"  ✓ Already exists: {name} → {cat_path}")
+            else:
+                print(f"  ✓ Already exists: {name} → {skill_dir}")
             with self._lock:
                 self._downloaded_skills.add(name)
             return True
 
         # Download entire directory from GitHub
-        print(f"  📥 Downloading {name}...")
+        if self.organize:
+            description = skill.get("description", "")
+            category, subcategory = SkillCategorizer.categorize(description)
+            cat_path = f"{category}/{subcategory}" if subcategory else category
+            print(f"  📥 Downloading {name} → {cat_path}...")
+        else:
+            print(f"  📥 Downloading {name}...")
         
         try:
             downloaded_count = self.download_github_directory(
@@ -407,7 +603,7 @@ class SkillsDownloader:
             
             if downloaded_count > 0 and skill_md_path.exists():
                 stars = skill.get("stars", 0)
-                print(f"  ✓ Downloaded {name} ({downloaded_count} files, {stars} stars) → {skill_dir}")
+                print(f"  ✓ Downloaded {name} ({downloaded_count} files, {stars} stars)")
                 
                 with self._lock:
                     self._downloaded_skills.add(name)
@@ -511,7 +707,10 @@ class SkillsDownloader:
     def ensure_skills_dir(self):
         """Ensure the skills directory exists."""
         self.SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"Skills directory: {self.SKILLS_DIR}")
+        if self.organize:
+            print(f"Skills directory: {self.SKILLS_DIR} (organized by category)")
+        else:
+            print(f"Skills directory: {self.SKILLS_DIR}")
 
     def run_search(self, query: str):
         """Run a search-based download."""
@@ -575,6 +774,8 @@ class SkillsDownloader:
         print(f"\n{'='*60}")
         print(f"Download complete: {success}/{total} skills")
         print(f"Already downloaded: {len(self._downloaded_skills)} skills total")
+        if self.organize:
+            print(f"Organization: Multi-level directory structure enabled")
         print(f"{'='*60}")
 
 
@@ -589,6 +790,7 @@ def parse_args():
     max_retries = 3
     mode = None
     n = None
+    organize = False
 
     i = 0
     while i < len(args):
@@ -619,6 +821,9 @@ def parse_args():
             else:
                 print("Error: --retry requires a number argument")
                 sys.exit(1)
+        elif arg == "--organize":
+            organize = True
+            i += 1
         elif arg.startswith("-"):
             print(f"Unknown option: {arg}")
             sys.exit(1)
@@ -634,7 +839,8 @@ def parse_args():
         "workers": workers,
         "max_retries": max_retries,
         "mode": mode,
-        "n": n
+        "n": n,
+        "organize": organize
     }
 
 
@@ -648,7 +854,8 @@ def main():
     downloader = SkillsDownloader(
         min_stars=params["min_stars"],
         workers=params["workers"],
-        max_retries=params["max_retries"]
+        max_retries=params["max_retries"],
+        organize=params["organize"]
     )
 
     if params["mode"] == "all":

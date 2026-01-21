@@ -10,6 +10,7 @@
 - 🔄 **自动重试**：下载失败时自动重试，确保下载成功
 - 📦 **断点续传**：自动跳过已下载的 skills
 - 🎯 **标准化结构**：自动保持官方 skill 目录结构
+- 📁 **多级目录组织**：支持按功能/流程/权限自动分类存储（使用 `--organize` 参数）
 
 ## 📋 前置要求
 
@@ -82,13 +83,19 @@ python download_skills.py --all 500 --workers 10
 
 - `--workers N`：设置并发线程数（默认 5）
 - `--retry N`：设置失败重试次数（默认 3）
+- `--organize`：启用多级目录组织模式（按功能/流程/权限分类）
 
 ```bash
 # 使用 10 个并发线程，失败重试 5 次
 python download_skills.py --all 500 --workers 10 --retry 5
+
+# 启用多级目录组织，下载所有 star >= 500 的 skills
+python download_skills.py --all 500 --organize
 ```
 
 ## 📁 下载位置
+
+### 默认模式（扁平结构）
 
 所有 skills 将下载到：
 ```
@@ -103,6 +110,78 @@ python download_skills.py --all 500 --workers 10 --retry 5
   ├── references/        # 参考文档（如果有）
   └── ...                # 其他文件
 ```
+
+### 多级目录组织模式（`--organize`）
+
+启用 `--organize` 参数后，skills 将按照"功能/流程/权限"原则自动分类存储：
+
+```
+~/.claude/skills/
+  ├── Development/
+  │   ├── Frontend/
+  │   │   ├── react/
+  │   │   │   └── SKILL.md
+  │   │   └── vue/
+  │   │       └── SKILL.md
+  │   ├── Backend/
+  │   │   └── nodejs/
+  │   │       └── SKILL.md
+  │   └── Mobile/
+  │       └── flutter/
+  │           └── SKILL.md
+  ├── Data/
+  │   ├── DataScience/
+  │   │   └── pandas/
+  │   │       └── SKILL.md
+  │   └── MachineLearning/
+  │       └── pytorch/
+  │           └── SKILL.md
+  ├── Testing/
+  │   ├── UnitTesting/
+  │   │   └── pytest/
+  │   │       └── SKILL.md
+  │   └── E2ETesting/
+  │       └── playwright/
+  │           └── SKILL.md
+  ├── Documentation/
+  │   └── Technical/
+  │       └── api-docs/
+  │           └── SKILL.md
+  ├── Security/
+  │   └── Auth/
+  │       └── oauth/
+  │           └── SKILL.md
+  └── ...
+
+```
+
+#### 支持的分类体系
+
+**主分类（一级目录）：**
+- `Development` - 开发相关
+- `Data` - 数据处理与分析
+- `Testing` - 测试相关
+- `Documentation` - 文档编写
+- `Security` - 安全相关
+- `Design` - 设计相关
+- `Business` - 业务相关
+- `Research` - 研究相关
+- `Uncategorized` - 未分类（无法识别的 skills）
+
+**子分类（二级目录）：**
+- Development: `Frontend`, `Backend`, `Mobile`, `DevOps`
+- Data: `DataScience`, `MachineLearning`, `DataEngineering`
+- Testing: `UnitTesting`, `E2ETesting`, `Performance`
+- Documentation: `Technical`, `UserGuides`, `Blog`
+- Security: `Auth`, `Compliance`, `Audit`
+- Design: `UIDesign`, `UXDesign`, `Graphics`
+- Business: `ProductManagement`, `Marketing`, `Analytics`
+- Research: `Scientific`, `Academic`, `Medical`
+
+**分类原则：**
+- 通过 skill 的 description 内容进行关键词匹配
+- 优先匹配子分类，未匹配到子分类时归入主分类
+- 无法识别的 skills 归入 `Uncategorized` 分类
 
 ## 🔑 环境变量
 
